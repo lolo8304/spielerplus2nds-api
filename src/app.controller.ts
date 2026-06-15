@@ -22,8 +22,8 @@ export class AppController {
   }
 
   @Get('downloads')
-  getDownloads() {
-    return this.appService.listDownloads();
+  getDownloads(@Query('season') season?: string) {
+    return this.appService.listDownloads(season);
   }
 
   @Get('wildcards')
@@ -59,5 +59,10 @@ export class AppController {
       body.targetId ?? body.team ?? '',
       body.season,
     );
+  }
+
+  @Post('downloads/clear')
+  clearDownload(@Body() body: { filename: string; season?: string }) {
+    return this.appService.clearDownload(body.filename, body.season);
   }
 }

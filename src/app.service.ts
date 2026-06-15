@@ -40,6 +40,67 @@ export interface DownloadFile {
   size: number;
   modifiedAt: string;
   pattern: string;
+  guess?: DownloadGuess;
+}
+
+export interface DownloadGuess {
+  targetId: string;
+  team: Team;
+  subteam?: string;
+  name: string;
+  folder: string;
+  file: string;
+  pattern: string;
+  score: number;
+  identityScore: number;
+  sameRowsPercent: number;
+  existingRowsMatchedPercent: number;
+  downloadedRows: number;
+  existingRows: number;
+  matchingRows: number;
+  addedRows: number;
+  removedRows: number;
+  teamIds: string[];
+  teamNames: string[];
+  candidates: DownloadGuessCandidate[];
+}
+
+export interface DownloadGuessCandidate {
+  targetId: string;
+  team: Team;
+  subteam?: string;
+  name: string;
+  folder: string;
+  file: string;
+  pattern: string;
+  score: number;
+  identityScore: number;
+  sameRowsPercent: number;
+  existingRowsMatchedPercent: number;
+  downloadedRows: number;
+  existingRows: number;
+  matchingRows: number;
+  addedRows: number;
+  removedRows: number;
+  teamIds: string[];
+  teamNames: string[];
+}
+
+interface DownloadCandidate {
+  targetId: string;
+  team: Team;
+  subteam?: string;
+  name: string;
+  folder: string;
+  file: string;
+  pattern: string;
+}
+
+interface DownloadSnapshot {
+  rows: Set<string>;
+  rowCount: number;
+  teamIds: Set<string>;
+  teamNames: Set<string>;
 }
 
 export interface TeamStatus {
@@ -159,7 +220,9 @@ export class AppService implements OnModuleInit, OnModuleDestroy {
     return this.downloadEvents.asObservable();
   }
 
-  async listDownloads(): Promise<DownloadFile[]> {
+  async listDownloads(season = DEFAULT_SEASON): Promise<DownloadFile[]> {
+    this.assertSeason(season);
+
     const entries = await fs.readdir(DOWNLOAD_FOLDER);
     const files = await Promise.all(
       entries.map(async (name) => {
@@ -181,9 +244,16 @@ export class AppService implements OnModuleInit, OnModuleDestroy {
       }),
     );
 
-    return files
-      .filter((file): file is DownloadFile => Boolean(file))
-      .sort((a, b) => b.modifiedAt.localeCompare(a.modifiedAt));
+    const downloads = await Promise.all(
+      files
+        .filter((file): file is DownloadFile => Boolean(file))
+        .map(async (file) => ({
+          ...file,
+          guess: await this.guessDownloadTarget(file, season),
+        })),
+    );
+
+    return downloads.sort((a, b) => b.modifiedAt.localeCompare(a.modifiedAt));
   }
 
   async listTeamStatuses(season = DEFAULT_SEASON): Promise<TeamStatus[]> {
@@ -256,7 +326,7 @@ export class AppService implements OnModuleInit, OnModuleDestroy {
     );
 
     await fs.move(source, target, { overwrite: false });
-    const downloads = await this.listDownloads();
+    const downloads = await this.listDownloads(season);
     this.downloadEvents.next({ type: 'moved', files: downloads });
 
     return {
@@ -269,6 +339,35 @@ export class AppService implements OnModuleInit, OnModuleDestroy {
       target,
       archivedPrevious: archivedFiles.length > 0,
       archivedFiles,
+      downloads,
+    };
+  }
+
+  async clearDownload(filename: string, season = DEFAULT_SEASON) {
+    this.assertSafeFilename(filename);
+    this.assertSeason(season);
+
+    const pattern = this.matchPattern(filename);
+    if (!pattern) {
+      throw new BadRequestException(
+        'File does not match an allowed download pattern.',
+      );
+    }
+
+    const source = path.join(DOWNLOAD_FOLDER, filename);
+    const sourceExists = await fs.pathExists(source);
+    if (!sourceExists) {
+      throw new BadRequestException('Download file no longer exists.');
+    }
+
+    await fs.remove(source);
+    const downloads = await this.listDownloads(season);
+    this.downloadEvents.next({ type: 'cleared', files: downloads });
+
+    return {
+      cleared: true,
+      filename,
+      season,
       downloads,
     };
   }
@@ -441,6 +540,338 @@ export class AppService implements OnModuleInit, OnModuleDestroy {
       .map((file) => path.join(folder, file));
 
     return matchingFiles.length > 0 ? matchingFiles[0] : '';
+  }
+
+  private async guessDownloadTarget(
+    file: DownloadFile,
+    season: string,
+  ): Promise<DownloadGuess | undefined> {
+    const downloaded = await this.readDownloadSnapshot(file.path, file.pattern);
+    if (downloaded.rowCount === 0) {
+      return undefined;
+    }
+
+    const candidates = await this.getDownloadCandidates(season, file.pattern);
+    const guesses = (
+      await Promise.all(
+        candidates.map(async (candidate) => {
+          const existing = await this.readDownloadSnapshot(
+            candidate.file,
+            candidate.pattern,
+          );
+          if (existing.rowCount === 0) {
+            return null;
+          }
+
+          const matchingRows = this.countSetIntersection(
+            downloaded.rows,
+            existing.rows,
+          );
+          const addedRows = Math.max(0, downloaded.rowCount - matchingRows);
+          const removedRows = Math.max(0, existing.rowCount - matchingRows);
+          const hasMatchingTeamId = this.hasSetIntersection(
+            downloaded.teamIds,
+            existing.teamIds,
+          );
+          const hasMatchingTeamName = this.hasSetIntersection(
+            downloaded.teamNames,
+            existing.teamNames,
+          );
+          const score = matchingRows / downloaded.rowCount;
+          const sameRowsPercent = this.toPercent(score);
+          const existingRowsMatchedPercent = this.toPercent(
+            matchingRows / existing.rowCount,
+          );
+          const identityScore = hasMatchingTeamId
+            ? 1
+            : hasMatchingTeamName
+              ? 0.85
+              : 0;
+
+          return {
+            ...candidate,
+            score: Number(score.toFixed(4)),
+            sameRowsPercent,
+            existingRowsMatchedPercent,
+            identityScore,
+            downloadedRows: downloaded.rowCount,
+            existingRows: existing.rowCount,
+            matchingRows,
+            addedRows,
+            removedRows,
+            teamIds: Array.from(downloaded.teamIds).sort(),
+            teamNames: Array.from(downloaded.teamNames).sort(),
+          };
+        }),
+      )
+    )
+      .filter((guess): guess is DownloadGuessCandidate => Boolean(guess))
+      .sort(
+        (left, right) =>
+          right.score - left.score ||
+          right.identityScore - left.identityScore ||
+          right.matchingRows - left.matchingRows ||
+          left.addedRows - right.addedRows ||
+          left.removedRows - right.removedRows,
+      );
+
+    const [bestGuess] = guesses;
+    if (
+      !bestGuess ||
+      (bestGuess.score === 0 && bestGuess.identityScore === 0)
+    ) {
+      return undefined;
+    }
+
+    return {
+      ...bestGuess,
+      candidates: guesses.slice(0, 5),
+    };
+  }
+
+  private async getDownloadCandidates(
+    season: string,
+    pattern: string,
+  ): Promise<DownloadCandidate[]> {
+    const targetPattern = this.getCandidateFileRegex(pattern);
+    const includeSubteams =
+      !this.patternToRegex('statistics-*.csv').test(pattern);
+    const nestedCandidates: Array<Array<DownloadCandidate | null>> =
+      await Promise.all(
+        TEAMS.map(async (team) => {
+          const config = await this.readTeamConfig(season, team);
+          const targetIds = [
+            this.getTargetId(team),
+            ...(includeSubteams
+              ? this.getConfiguredSubteams(config).map((subteam) =>
+                  this.getTargetId(team, subteam),
+                )
+              : []),
+          ];
+
+          return Promise.all(
+            targetIds.map(async (targetId) => {
+              const target = await this.resolveFolderTarget(season, targetId);
+              const entries = await fs
+                .readdir(target.folder)
+                .catch((): string[] => []);
+              const files = (
+                await Promise.all(
+                  entries.map(async (entry) => {
+                    const filePath = path.join(target.folder, entry);
+                    const stat = await fs.stat(filePath).catch(() => null);
+                    return stat?.isFile() ? entry : null;
+                  }),
+                )
+              ).filter((entry): entry is string => Boolean(entry));
+              const latestFile = this.findLatestFile(
+                target.folder,
+                files,
+                targetPattern,
+              );
+
+              if (!latestFile) {
+                return null;
+              }
+
+              return {
+                targetId: target.id,
+                team: target.team,
+                subteam: target.subteam,
+                name: target.subteam ?? target.team,
+                folder: target.folder,
+                file: latestFile,
+                pattern,
+              };
+            }),
+          );
+        }),
+      );
+
+    return nestedCandidates
+      .flat()
+      .filter((candidate): candidate is DownloadCandidate =>
+        Boolean(candidate),
+      );
+  }
+
+  private getCandidateFileRegex(pattern: string) {
+    if (this.patternToRegex('*_Teilnehmende_*.csv').test(pattern)) {
+      return /Teilnehmende.*\.csv$/i;
+    }
+
+    if (this.patternToRegex('*_Leiterinnen_*.xlsx').test(pattern)) {
+      return /Leiter.*\.xlsx$/i;
+    }
+
+    if (this.patternToRegex('*_Aktivitäten_*.xlsx').test(pattern)) {
+      return /Aktivitäten.*\.xlsx$/i;
+    }
+
+    if (this.patternToRegex('statistics-*.csv').test(pattern)) {
+      return /^statistics-.*\.csv$/i;
+    }
+
+    return this.patternToRegex(pattern);
+  }
+
+  private async readDownloadSnapshot(
+    filePath: string,
+    pattern: string,
+  ): Promise<DownloadSnapshot> {
+    if (/\.xlsx$/i.test(filePath)) {
+      return this.readXlsxSnapshot(filePath);
+    }
+
+    return this.readCsvSnapshot(filePath, pattern);
+  }
+
+  private async readCsvSnapshot(
+    filePath: string,
+    pattern: string,
+  ): Promise<DownloadSnapshot> {
+    const content = await fs.readFile(filePath, 'utf8').catch(() => '');
+    const lines = content
+      .replace(/^\uFEFF/, '')
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0);
+    const [headerLine, ...rowLines] = lines;
+    const headers = headerLine ? this.parseCsvLine(headerLine) : [];
+    const teamIdIndex = headers.findIndex((header) => header === 'team_id');
+    const teamNameIndex = headers.findIndex((header) => header === 'team_name');
+    const ignoredIndexes = new Set(
+      this.getIgnoredCsvColumns(pattern)
+        .map((ignoredColumn) =>
+          headers.findIndex((header) => header === ignoredColumn),
+        )
+        .filter((index) => index >= 0),
+    );
+    const rows = new Set<string>();
+    const teamIds = new Set<string>();
+    const teamNames = new Set<string>();
+
+    for (const rowLine of rowLines) {
+      const normalizedLine = rowLine.normalize('NFC');
+      const values = this.parseCsvLine(normalizedLine);
+      const rowKey =
+        ignoredIndexes.size > 0
+          ? values
+              .filter((_, index) => !ignoredIndexes.has(index))
+              .map((value) => value.trim().normalize('NFC'))
+              .join('\u001F')
+          : normalizedLine;
+      const teamId = teamIdIndex >= 0 ? values[teamIdIndex]?.trim() : '';
+      const teamName =
+        teamNameIndex >= 0
+          ? values[teamNameIndex]?.trim().normalize('NFC')
+          : '';
+
+      rows.add(rowKey);
+
+      if (teamId) {
+        teamIds.add(teamId);
+      }
+
+      if (teamName) {
+        teamNames.add(teamName);
+      }
+    }
+
+    return {
+      rows,
+      rowCount: rows.size,
+      teamIds,
+      teamNames,
+    };
+  }
+
+  private async readXlsxSnapshot(filePath: string): Promise<DownloadSnapshot> {
+    const rows = await this.readXlsxRows(filePath).catch(
+      (): Record<string, string>[] => [],
+    );
+    const rowKeys = new Set<string>();
+
+    for (const row of rows) {
+      rowKeys.add(this.createRowObjectKey(row));
+    }
+
+    return {
+      rows: rowKeys,
+      rowCount: rowKeys.size,
+      teamIds: new Set<string>(),
+      teamNames: new Set<string>(),
+    };
+  }
+
+  private createRowObjectKey(row: Record<string, string>) {
+    return Object.keys(row)
+      .sort((left, right) => left.localeCompare(right))
+      .map(
+        (key) =>
+          `${key.trim().normalize('NFC')}=${(row[key] ?? '').trim().normalize('NFC')}`,
+      )
+      .join('\u001F');
+  }
+
+  private getIgnoredCsvColumns(pattern: string) {
+    if (this.patternToRegex('statistics-*.csv').test(pattern)) {
+      return ['search_params'];
+    }
+
+    return [];
+  }
+
+  private parseCsvLine(line: string) {
+    const values: string[] = [];
+    let value = '';
+    let quoted = false;
+
+    for (let index = 0; index < line.length; index += 1) {
+      const character = line[index];
+      const nextCharacter = line[index + 1];
+
+      if (character === '"' && quoted && nextCharacter === '"') {
+        value += '"';
+        index += 1;
+      } else if (character === '"') {
+        quoted = !quoted;
+      } else if (character === ';' && !quoted) {
+        values.push(value);
+        value = '';
+      } else {
+        value += character;
+      }
+    }
+
+    values.push(value);
+    return values;
+  }
+
+  private countSetIntersection(left: Set<string>, right: Set<string>) {
+    let count = 0;
+
+    for (const value of left) {
+      if (right.has(value)) {
+        count += 1;
+      }
+    }
+
+    return count;
+  }
+
+  private hasSetIntersection(left: Set<string>, right: Set<string>) {
+    for (const value of left) {
+      if (right.has(value)) {
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  private toPercent(value: number) {
+    return Number((value * 100).toFixed(1));
   }
 
   private async countCsvRows(filePath: string) {
