@@ -24,7 +24,7 @@ npm install
 npm run start:dev
 ```
 
-The API listens on `http://localhost:3001`.
+The API listens on `http://localhost:3002`.
 
 ## Build and lint
 
