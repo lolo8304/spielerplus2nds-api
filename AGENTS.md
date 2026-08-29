@@ -40,6 +40,21 @@ access. Keep file operations and generator invocation here, not in the frontend.
   on the overall changes, commit the relevant changes there, push the branch, and
   merge it back to `main` automatically.
 
+## Ports And Locations
+
+- Frontend app: `http://localhost:3001`
+- API: `http://localhost:3000`
+- Java generator repository: `/Users/Lolo/git/spielerplus2nds`
+- Java generator command wrapper:
+  `/Users/Lolo/git/spielerplus2nds/nds.sh`
+- Java generator run location: `/Users/Lolo/git/spielerplus2nds`
+- Java installed app binary:
+  `/Users/Lolo/git/spielerplus2nds/app/build/install/app/bin/app`
+- Data folder root: `/Users/Lolo/git/spielerplus2nds/data`
+- Downloads folder: `/Users/Lolo/Downloads`
+- Example season folder: `/Users/Lolo/git/spielerplus2nds/data/2026-1`
+- Example team folder: `/Users/Lolo/git/spielerplus2nds/data/2026-1/B`
+
 ## Local Commands
 
 - Install: `npm install`
