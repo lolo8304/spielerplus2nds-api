@@ -20,7 +20,7 @@ export const DOWNLOAD_PATTERNS = [
   '*_Teilnehmende_*.csv',
   'statistics-*.csv',
 ];
-export const DEFAULT_SEASON = '2026-1';
+export const DEFAULT_SEASON = '2026-2';
 export const WILDCARDS_FILE = 'nds+anwesenheiten-always.csv';
 export const NDS_SCRIPT = '/Users/Lolo/git/spielerplus2nds/nds.sh';
 export const ALL_TARGET = '__all';
@@ -1616,18 +1616,42 @@ export class AppService implements OnModuleInit, OnModuleDestroy {
   }
 
   private getSeasons() {
-    const seasons: string[] = [];
-    for (let year = 2026; year >= 2023; year -= 1) {
-      seasons.push(`${year}-1`);
-      seasons.push(`${year}-2`);
-    }
-    return seasons
-      .filter((season) => season !== '2026-2')
-      .sort((left, right) => {
-        const [leftYear, leftSeason] = left.split('-').map(Number);
-        const [rightYear, rightSeason] = right.split('-').map(Number);
+    let entries: fs.Dirent[];
 
-        return rightYear - leftYear || rightSeason - leftSeason;
+    try {
+      entries = fs.readdirSync(DATA_FOLDER, { withFileTypes: true });
+    } catch {
+      return [DEFAULT_SEASON];
+    }
+
+    return entries
+      .filter(
+        (entry) =>
+          entry.isDirectory() &&
+          !entry.name.startsWith('.') &&
+          path.basename(entry.name) === entry.name,
+      )
+      .map((entry) => entry.name)
+      .sort((left, right) => {
+        const leftSeason = /^(\d{4})-(\d+)$/.exec(left);
+        const rightSeason = /^(\d{4})-(\d+)$/.exec(right);
+
+        if (leftSeason && rightSeason) {
+          return (
+            Number(rightSeason[1]) - Number(leftSeason[1]) ||
+            Number(rightSeason[2]) - Number(leftSeason[2])
+          );
+        }
+
+        if (leftSeason) {
+          return -1;
+        }
+
+        if (rightSeason) {
+          return 1;
+        }
+
+        return left.localeCompare(right);
       });
   }
 
